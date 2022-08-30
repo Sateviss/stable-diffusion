@@ -13,9 +13,9 @@ from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import contextmanager, nullcontext
 from ldm.util import instantiate_from_config
-from optimUtils import split_weighted_subprompts, logger
+from split_subprompts import split_weighted_subprompts
 from transformers import logging
-import pandas as pd
+
 logging.set_verbosity_error()
 
 
@@ -147,32 +147,25 @@ parser.add_argument(
     help="Reduces inference time on the expense of 1GB VRAM",
 )
 parser.add_argument(
-    "--precision", 
-    type=str,
-    help="evaluate at this precision",
-    choices=["full", "autocast"],
-    default="autocast"
-)
-parser.add_argument(
-    "--format",
-    type=str,
-    help="output image format",
-    choices=["jpg", "png"],
-    default="png",
+    "--precision", type=str, help="evaluate at this precision", choices=["full", "autocast"], default="autocast"
 )
 opt = parser.parse_args()
 
 tic = time.time()
 os.makedirs(opt.outdir, exist_ok=True)
 outpath = opt.outdir
+
+if not opt.from_file:
+    sample_path = os.path.join(outpath, "_".join(re.split(":| ", opt.prompt)))[:150]
+else:
+    sample_path = outpath[:150]
+os.makedirs(sample_path, exist_ok=True)
+base_count = len(os.listdir(sample_path))
 grid_count = len(os.listdir(outpath)) - 1
 
 if opt.seed == None:
     opt.seed = randint(0, 1000000)
 seed_everything(opt.seed)
-
-# Logging
-logger(vars(opt), log_csv = "logs/txt2img_logs.csv")
 
 sd = load_model_from_config(f"{ckpt}")
 li, lo = [], []
@@ -232,7 +225,7 @@ else:
     with open(opt.from_file, "r") as f:
         data = f.read().splitlines()
         data = batch_size * list(data)
-        data = list(chunk(sorted(data), batch_size))
+        data = list(chunk(data, batch_size))
 
 
 if opt.precision == "autocast" and opt.device != "cpu":
@@ -246,11 +239,6 @@ with torch.no_grad():
     all_samples = list()
     for n in trange(opt.n_iter, desc="Sampling"):
         for prompts in tqdm(data, desc="data"):
-
-            sample_path = os.path.join(outpath, "_".join(re.split(":| ", prompts[0])))[:150]
-            os.makedirs(sample_path, exist_ok=True)
-            base_count = len(os.listdir(sample_path))
-
             with precision_scope("cuda"):
                 modelCS.to(opt.device)
                 uc = None
@@ -302,8 +290,10 @@ with torch.no_grad():
                     x_samples_ddim = modelFS.decode_first_stage(samples_ddim[i].unsqueeze(0))
                     x_sample = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
                     x_sample = 255.0 * rearrange(x_sample[0].cpu().numpy(), "c h w -> h w c")
+                    if not os.path.exists(os.path.join(sample_path, prompts[i])):
+                        os.makedirs(os.path.join(sample_path, prompts[i]))
                     Image.fromarray(x_sample.astype(np.uint8)).save(
-                        os.path.join(sample_path, "seed_" + str(opt.seed) + "_" + f"{base_count:05}.{opt.format}")
+                        os.path.join(os.path.join(sample_path, prompts[i]), "seed_" + str(opt.seed) + "_" + f"{base_count:05}.png")
                     )
                     seeds += str(opt.seed) + ","
                     opt.seed += 1
